@@ -1,12 +1,12 @@
-# paperrag skill
+# paper-rag skill
 
-A reusable `paperrag` skill template for agent environments, designed to build a local RAG knowledge base from academic PDF papers.
+A reusable `paper-rag` skill template for agent environments, designed to build a local RAG knowledge base from academic PDF papers.
 
 ## Repository Contents
 
-- `skills/paperrag/SKILL.md`: skill definition and usage instructions
-- `skills/paperrag/references/workflow.md`: detailed workflow and troubleshooting guide
-- `skills/paperrag/assets/PaperRAG/`: runnable template (scripts + config)
+- `skills/paper-rag/SKILL.md`: skill definition and usage instructions
+- `skills/paper-rag/references/workflow.md`: detailed workflow and troubleshooting guide
+- `skills/paper-rag/assets/PaperRAG/`: runnable template (scripts + config)
 
 ## What It Does
 
@@ -18,7 +18,7 @@ A reusable `paperrag` skill template for agent environments, designed to build a
 ## Local Validation (Optional)
 
 ```bash
-cd skills/paperrag/assets/PaperRAG
+cd skills/paper-rag/assets/PaperRAG
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 # macOS/Linux: source .venv/bin/activate
@@ -34,7 +34,7 @@ python build_rag_index.py
 
 ## Install as a Skill
 
-Copy `skills/paperrag` into your skills directory (for example `~/.agents/skills/paperrag`).
+Copy `skills/paper-rag` into your skills directory (for example `~/.agents/skills/paper-rag`).
 
 ## License
 

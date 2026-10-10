@@ -1,5 +1,5 @@
 ---
-name: paperrag
+name: paper-rag
 description: >
   Set up and use a local paper RAG (Retrieval-Augmented Generation) knowledge base
   for academic PDF papers. Use this skill when the user wants to: build a paper
