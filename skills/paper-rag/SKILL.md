@@ -17,6 +17,9 @@ description: >
 A 3-stage pipeline that turns a folder of PDF papers into a vector search index for agent use.
 All scripts live inside `PaperRAG/` alongside the data directories.
 
+Default embeddings run locally with `intfloat/multilingual-e5-small`, the smallest standard
+multilingual E5 variant (384 dimensions). No API key, GPU, or separate server is required.
+
 ## Directory Structure
 
 Copy the entire `assets/PaperRAG/` template into the user's working directory.
@@ -30,15 +33,42 @@ PaperRAG/
 ├── texts/                       ← Auto-created by Stage 1
 ├── chroma_db/                   ← Auto-created by Stage 2
 ├── pdf_to_text_converter.py     ← Stage 1
+├── embeddings.py               ← Shared local / HTTP embedding backend
 ├── build_rag_index.py           ← Stage 2
 └── query_rag.py                 ← Stage 3 (agent import)
 ```
 
 ## Setup
 
-### 1. Create virtual environment and install dependencies
+### 1. Ask about an embedding endpoint
 
-Always use a `.venv` inside `PaperRAG/` to keep dependencies isolated.
+At the start of a PaperRAG task, unless the user has already answered, ask:
+
+> “你有自己的 HTTP embedding endpoint 吗（OpenAI 兼容的 `/v1/embeddings` 接口）？
+> 有的话请提供 API base URL 和模型名；没有就默认在本地运行
+> `intfloat/multilingual-e5-small` 多语言小模型，不需要 API key。”
+
+- If the user has no endpoint, declines, or is unsure, use `embedding_provider: "local"`.
+  Do not require a cloud account or keep asking for an API key.
+- If the user chooses their endpoint, set `embedding_provider: "http"`, `base_url`
+  (e.g. `https://embeddings.example/v1`, not the full `/embeddings` route), and
+  `embedding_model`. Ask whether authentication is required. For authenticated endpoints,
+  request only the environment variable name (`api_key_env`, default `PAPER_RAG_API_KEY`);
+  have the user set the secret securely in the process environment. Never ask for a key
+  in chat or write one into `config.json`. Unauthenticated endpoints need no key.
+- For an existing index, reuse its saved embedding choice unless the user requests a
+  change. Never silently switch models/providers: a changed embedding space requires
+  a new collection and a rebuild, even if vector dimensions match.
+
+Local mode loads the model automatically when embedding is needed in each Python process,
+reusing it for subsequent calls in that process. The first run downloads model weights
+from Hugging Face; later runs use the local cache, not a fresh download. HTTP mode never
+loads the local model. PDF/text content stays local in local mode; HTTP mode sends chunks
+and queries to the selected endpoint.
+
+### 2. Create virtual environment and install dependencies
+
+Use Python 3.10+ and always use a `.venv` inside `PaperRAG/` to keep dependencies isolated.
 
 **Windows (PowerShell):**
 ```powershell
@@ -58,18 +88,21 @@ pip install -r requirements.txt
 
 The venv only needs to be created once. To reactivate later: `.venv\Scripts\activate` (Windows) or `source .venv/bin/activate` (macOS/Linux).
 
-### 2. Edit `config.json`
+### 3. Edit `config.json`
+
+The shipped configuration works locally without credentials:
 
 ```json
 {
-  "api_key": "sk-...",
-  "base_url": "https://api.openai.com/v1",
-  "embedding_model": "text-embedding-3-large",
+  "embedding_provider": "local",
+  "embedding_model": "intfloat/multilingual-e5-small",
+  "base_url": "",
+  "api_key_env": "PAPER_RAG_API_KEY",
   "collection_name": "my_papers",
   "chunk_size": 1000,
   "chunk_overlap": 100,
   "max_workers": 20,
-  "batch_size": 50,
+  "batch_size": 32,
   "top_k": 5,
   "expand_neighbors": true
 }
@@ -77,16 +110,23 @@ The venv only needs to be created once. To reactivate later: `.venv\Scripts\acti
 
 | Field | Description |
 |---|---|
-| `api_key` | OpenAI-compatible API key (required) |
-| `base_url` | API endpoint — change for custom proxies |
-| `embedding_model` | `text-embedding-3-large` (best) or `text-embedding-3-small` (cheaper) |
+| `embedding_provider` | `local` (default) or `http` (user's OpenAI-compatible endpoint) |
+| `embedding_model` | Local: `intfloat/multilingual-e5-small`; HTTP: the endpoint's model ID |
+| `base_url` | HTTP API base URL, usually ending in `/v1`; unused locally |
+| `api_key_env` | Environment variable holding an optional HTTP API key; never the key itself |
 | `collection_name` | ChromaDB collection name — use a short descriptive name |
 | `chunk_size` | Characters per chunk (default 1000) |
 | `chunk_overlap` | Overlap between chunks for context continuity (default 100) |
-| `max_workers` | Parallel embedding threads (reduce if hitting rate limits) |
-| `batch_size` | Chunks per API batch (reduce if hitting rate limits) |
+| `max_workers` | HTTP embedding threads (default 20); local mode always uses one model worker |
+| `batch_size` | Texts per embedding batch (default 32); reduce for limited RAM or API limits |
 | `top_k` | Default number of chunks to retrieve per query |
 | `expand_neighbors` | Include adjacent chunks for richer context (recommended: `true`) |
+
+Local E5 uses `passage: ` for indexed chunks, `query: ` for queries, and unit-normalized
+vectors. These prefixes are required even for non-English text. HTTP models whose final
+model-ID component starts with `multilingual-e5-` receive the same prefixes; other HTTP
+model IDs receive plain text (an E5 alias endpoint must handle its own preprocessing).
+E5 inputs are truncated at 512 tokens; the character-based chunk size is not a token limit.
 
 ## Running the Pipeline
 
@@ -178,7 +218,8 @@ index was built. This is useful for the agent to understand the chunking strateg
 ```python
 engine = RAGQueryEngine()
 print(engine.collection_metadata)
-# {'chunk_size': 1000, 'chunk_overlap': 100, 'embedding_model': 'text-embedding-3-large', ...}
+# {'chunk_size': 1000, 'chunk_overlap': 100, 'embedding_provider': 'local',
+#  'embedding_model': 'intfloat/multilingual-e5-small', ...}
 ```
 
 ## Workflow Details

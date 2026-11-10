@@ -22,26 +22,19 @@ import json
 from pathlib import Path
 from typing import List, Dict, Optional
 import chromadb
-from openai import OpenAI
+from embeddings import EmbeddingBackend
 
 # ==================== Load config ====================
 _CONFIG_PATH = Path(__file__).parent / "config.json"
 with open(_CONFIG_PATH, "r", encoding="utf-8") as _f:
     _CFG = json.load(_f)
 
-OPENAI_API_KEY = _CFG["api_key"]
-OPENAI_BASE_URL = _CFG.get("base_url", "https://api.openai.com/v1")
-EMBEDDING_MODEL = _CFG.get("embedding_model", "text-embedding-3-large")
 COLLECTION_NAME = _CFG.get("collection_name", "my_papers")
 TOP_K = _CFG.get("top_k", 5)
 EXPAND_NEIGHBORS = _CFG.get("expand_neighbors", True)
 
 _BASE_DIR = Path(__file__).parent
 CHROMA_DB_DIR = _BASE_DIR / "chroma_db"
-
-# ==================== OpenAI client ====================
-client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
-
 
 class RAGQueryEngine:
     def __init__(
@@ -60,7 +53,11 @@ class RAGQueryEngine:
         col_name = collection_name or COLLECTION_NAME
 
         self.chroma_client = chromadb.PersistentClient(path=db_path)
-        self.collection = self.chroma_client.get_collection(name=col_name)
+        self.collection = self.chroma_client.get_collection(
+            name=col_name, embedding_function=None
+        )
+        self.embedder = EmbeddingBackend(_CFG)
+        self.embedder.check_collection(self.collection)
 
         # Read collection metadata (chunk_size, chunk_overlap, etc. from build time)
         self.collection_metadata = self.collection.metadata or {}
@@ -71,8 +68,7 @@ class RAGQueryEngine:
 
     def get_embedding(self, text: str) -> List[float]:
         """Embed a query string."""
-        response = client.embeddings.create(model=EMBEDDING_MODEL, input=text)
-        return response.data[0].embedding
+        return self.embedder.embed_query(text)
 
     def expand_with_neighbors(self, chunk_ids: List[str]) -> List[str]:
         """

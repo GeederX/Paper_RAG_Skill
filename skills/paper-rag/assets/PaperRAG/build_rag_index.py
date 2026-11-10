@@ -2,7 +2,7 @@
 RAG Index Builder
 - Reads text files from texts/ directory
 - Chunks text with overlap and sentence-boundary awareness
-- Generates OpenAI embeddings in parallel batches
+- Generates embeddings locally with E5, or via a user-supplied HTTP endpoint
 - Stores vectors and metadata in ChromaDB
 - Supports incremental re-runs (skips already-embedded chunks)
 """
@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import List, Dict
 import chromadb
-from openai import OpenAI
+from embeddings import EmbeddingBackend
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -20,14 +20,11 @@ _CONFIG_PATH = Path(__file__).parent / "config.json"
 with open(_CONFIG_PATH, "r", encoding="utf-8") as _f:
     _CFG = json.load(_f)
 
-OPENAI_API_KEY = _CFG["api_key"]
-OPENAI_BASE_URL = _CFG.get("base_url", "https://api.openai.com/v1")
-EMBEDDING_MODEL = _CFG.get("embedding_model", "text-embedding-3-large")
 COLLECTION_NAME = _CFG.get("collection_name", "my_papers")
 CHUNK_SIZE = _CFG.get("chunk_size", 1000)
 CHUNK_OVERLAP = _CFG.get("chunk_overlap", 100)
 MAX_WORKERS = _CFG.get("max_workers", 20)
-BATCH_SIZE = _CFG.get("batch_size", 50)
+BATCH_SIZE = _CFG.get("batch_size", 32)
 
 # Paths are always relative to this script's directory (PaperRAG/)
 _BASE_DIR = Path(__file__).parent
@@ -37,8 +34,8 @@ CHROMA_DB_DIR = _BASE_DIR / "chroma_db"
 SKIP_EXISTING = True
 EXISTING_ID_PAGE_SIZE = 5000
 
-# ==================== OpenAI client ====================
-client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+# Local models are loaded lazily; HTTP mode never loads local model weights.
+embedder = EmbeddingBackend(_CFG)
 
 
 def chunk_text(
@@ -89,35 +86,28 @@ def chunk_text(
     return chunks
 
 
-def get_embedding(text: str) -> List[float]:
-    """Get embedding for a single text string."""
-    response = client.embeddings.create(model=EMBEDDING_MODEL, input=text)
-    return response.data[0].embedding
-
-
 def build_index():
     """Build (or incrementally update) the RAG index."""
     print("Starting RAG index build...", flush=True)
     print(f"  Collection : {COLLECTION_NAME}", flush=True)
-    print(f"  Embed model: {EMBEDDING_MODEL}", flush=True)
-    print(f"  API base   : {OPENAI_BASE_URL}\n", flush=True)
+    print(f"  Embed model: {embedder.model_name}", flush=True)
+    print(f"  Provider   : {embedder.provider}", flush=True)
+    if embedder.provider == "http":
+        print(f"  API base   : {embedder.base_url}", flush=True)
 
-    # 1. Init ChromaDB
+    # Validate before skipping chunks or changing metadata in an existing index.
     chroma_client = chromadb.PersistentClient(path=str(CHROMA_DB_DIR))
-    try:
-        collection = chroma_client.get_collection(name=COLLECTION_NAME)
-        print("[OK] Loaded existing ChromaDB collection", flush=True)
-    except Exception:
-        collection = chroma_client.create_collection(
-            name=COLLECTION_NAME,
-            metadata={
-                "chunk_size": CHUNK_SIZE,
-                "chunk_overlap": CHUNK_OVERLAP,
-                "embedding_model": EMBEDDING_MODEL,
-                "description": "PaperRAG index",
-            },
-        )
-        print("[OK] Created new ChromaDB collection", flush=True)
+    collection = chroma_client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        embedding_function=None,
+        metadata={
+            "chunk_size": CHUNK_SIZE,
+            "chunk_overlap": CHUNK_OVERLAP,
+            **embedder.metadata,
+            "description": "PaperRAG index",
+        },
+    )
+    embedder.check_collection(collection)
 
     # 2. Read text files
     text_files = list(TEXTS_DIR.glob("*.txt"))
@@ -180,9 +170,10 @@ def build_index():
         print("\n[OK] Index is already up to date. Nothing to embed.")
         return
 
-    # 5. Embed in parallel batches
+    # A single worker shares one local model; HTTP requests may run concurrently.
+    workers = 1 if embedder.provider == "local" else MAX_WORKERS
     print(
-        f"\nGenerating embeddings ({MAX_WORKERS} threads, batch size {BATCH_SIZE})..."
+        f"\nGenerating embeddings ({workers} threads, batch size {BATCH_SIZE})..."
     )
     failed_log = CHROMA_DB_DIR / "failed_chunks.jsonl"
 
@@ -196,8 +187,7 @@ def build_index():
             ]
             if not texts:
                 return batch_idx, [], [], None
-            response = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
-            embeddings = [item.embedding for item in response.data]
+            embeddings = embedder.embed_documents(texts)
             return batch_idx, batch, embeddings, None
         except Exception as e:
             return batch_idx, batch, None, str(e)
@@ -209,7 +199,7 @@ def build_index():
     success_count = 0
     failed_count = 0
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(process_batch, b): b[0] for b in batches}
         with tqdm(total=len(batches), desc="Embedding batches") as pbar:
             for future in as_completed(futures):
@@ -235,13 +225,7 @@ def build_index():
                                 )
                             continue
                         try:
-                            emb = (
-                                client.embeddings.create(
-                                    model=EMBEDDING_MODEL, input=text
-                                )
-                                .data[0]
-                                .embedding
-                            )
+                            emb = embedder.embed_documents([text])[0]
                             collection.add(
                                 ids=[chunk["chunk_id"]],
                                 embeddings=[emb],
@@ -303,7 +287,7 @@ def build_index():
             metadata={
                 "chunk_size": CHUNK_SIZE,
                 "chunk_overlap": CHUNK_OVERLAP,
-                "embedding_model": EMBEDDING_MODEL,
+                **embedder.metadata,
                 "description": "PaperRAG index",
             }
         )
@@ -313,7 +297,4 @@ def build_index():
 
 
 if __name__ == "__main__":
-    if not OPENAI_API_KEY or OPENAI_API_KEY == "your-api-key-here":
-        print("[ERROR] Please set api_key in config.json")
-        exit(1)
     build_index()

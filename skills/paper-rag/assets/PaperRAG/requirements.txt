@@ -2,3 +2,4 @@ pdfplumber
 chromadb
 openai
 tqdm
+sentence-transformers>=3
